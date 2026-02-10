@@ -1,0 +1,27 @@
+{
+  "name": "OCR Forge - AI Text Extraction",
+  "short_name": "OCR Forge",
+  "description": "Extract text from images and PDFs with AI-powered OCR using PaddleOCR",
+  "start_url": "/aiocr/api/v1/forge",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#10b981",
+  "orientation": "portrait",
+  "scope": "/aiocr/",
+  "icons": [
+    {
+      "src": "/aiocr/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/aiocr/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ],
+  "categories": ["productivity", "utilities"],
+  "screenshots": []
+}

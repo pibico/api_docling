@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#10b981" rx="80"/>
+  <text x="256" y="320" font-family="Arial, sans-serif" font-size="280" font-weight="bold" fill="white" text-anchor="middle">OCR</text>
+  <path d="M 100 420 L 412 420" stroke="white" stroke-width="20" stroke-linecap="round"/>
+  <rect x="120" y="80" width="272" height="200" fill="none" stroke="white" stroke-width="12" rx="10"/>
+</svg>
