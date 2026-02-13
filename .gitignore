@@ -67,3 +67,7 @@ htmlcov/
 
 # Legacy/Archive
 .archive/
+
+# Anthropic
+CLAUDE.md
+.claude/
