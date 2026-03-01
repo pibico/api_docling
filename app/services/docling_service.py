@@ -25,25 +25,22 @@ class DoclingService:
         self.is_initialized = False
 
     async def initialize(self):
-        """Initialize the Docling converter"""
+        """Initialize the Docling converter without OCR (PaddleOCR handles OCR externally)"""
         try:
             from docling.document_converter import DocumentConverter, PdfFormatOption
             from docling.datamodel.base_models import InputFormat
-            from docling.datamodel.pipeline_options import PdfPipelineOptions, EasyOcrOptions
+            from docling.datamodel.pipeline_options import PdfPipelineOptions
             from docling.datamodel.accelerator_options import AcceleratorOptions
 
-            # Configure pipeline with GPU acceleration
+            # Docling handles layout + table structure on GPU
+            # OCR disabled here — PaddleOCR API is primary, EasyOCR is last resort
             pipeline_options = PdfPipelineOptions(
                 accelerator_options=AcceleratorOptions(
                     device=settings.DOCLING_DEVICE,
                     num_threads=4
                 ),
-                do_ocr=settings.DOCLING_DO_OCR,
+                do_ocr=False,
                 do_table_structure=settings.DOCLING_DO_TABLE_STRUCTURE,
-                ocr_options=EasyOcrOptions(
-                    use_gpu=settings.DOCLING_USE_GPU,
-                    lang=settings.DOCLING_OCR_LANGUAGES
-                )
             )
 
             self.converter = DocumentConverter(
@@ -53,7 +50,7 @@ class DoclingService:
             )
 
             self.is_initialized = True
-            logger.info("Docling service initialized successfully")
+            logger.info("Docling service initialized (OCR disabled — using PaddleOCR API)")
 
         except Exception as e:
             logger.error(f"Failed to initialize Docling service: {e}")
@@ -61,9 +58,16 @@ class DoclingService:
             raise
 
     def cleanup(self):
-        """Cleanup resources"""
+        """Cleanup resources and free GPU memory"""
         self.converter = None
         self.is_initialized = False
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                logger.info("CUDA cache cleared")
+        except Exception as e:
+            logger.warning(f"Failed to clear CUDA cache: {e}")
         logger.info("Docling service cleaned up")
 
     def is_gpu_available(self) -> bool:
@@ -128,20 +132,26 @@ class DoclingService:
                 }
 
             except Exception as e:
-                logger.info(f"Docling conversion failed, trying OCR fallback: {e}")
+                logger.info(f"Docling conversion needs OCR fallback: {e}")
 
                 if not use_ocr:
                     raise RuntimeError(
                         "Document appears to be scanned but OCR is disabled"
                     )
 
-                # Fallback to OCR
-                markdown_content, tables_count = await self._process_with_ocr(
-                    file_path,
-                    file_path.name,
-                    detect_tables
-                )
-                ocr_used = True
+                # OCR chain: PaddleOCR API first, EasyOCR as last resort
+                try:
+                    logger.info("Trying PaddleOCR API...")
+                    markdown_content, tables_count = await self._process_with_paddleocr(
+                        file_path, file_path.name, detect_tables
+                    )
+                    ocr_engine = "paddleocr"
+                except Exception as paddle_err:
+                    logger.warning(f"PaddleOCR failed: {paddle_err}, falling back to EasyOCR")
+                    markdown_content, tables_count = await self._process_with_easyocr(
+                        file_path, file_path.name
+                    )
+                    ocr_engine = "easyocr"
 
                 processing_time = (datetime.now() - start_time).total_seconds()
 
@@ -150,6 +160,7 @@ class DoclingService:
                     "pages": None,
                     "tables_detected": tables_count,
                     "ocr_used": True,
+                    "ocr_engine": ocr_engine,
                     "processing_time": processing_time,
                     "metadata": None,
                     "status": "success"
@@ -160,42 +171,34 @@ class DoclingService:
             processing_time = (datetime.now() - start_time).total_seconds()
             raise
 
-    async def _process_with_ocr(
+    async def _process_with_paddleocr(
         self,
         pdf_path: Path,
         filename: str,
         detect_tables: bool = True
     ) -> Tuple[str, int]:
         """
-        Process PDF with OCR using PaddleOCR API
+        Process PDF with PaddleOCR API (primary OCR engine).
 
-        Args:
-            pdf_path: Path to PDF file
-            filename: Original filename
-            detect_tables: Enable table detection
-
-        Returns:
-            Tuple of (markdown_content, tables_count)
+        Raises on failure so caller can fall back to EasyOCR.
         """
         pdf = pdfium.PdfDocument(str(pdf_path))
         n_pages = len(pdf)
 
         markdown_content = f"# {Path(filename).stem}\n"
         tables_count = 0
+        errors = 0
 
         for page_num in range(n_pages):
-            logger.info(f"Processing page {page_num + 1}/{n_pages} with OCR...")
+            logger.info(f"PaddleOCR: page {page_num + 1}/{n_pages}")
 
-            # Render page
             page = pdf[page_num]
             pil_image = page.render(scale=2).to_pil()
 
-            # Convert to bytes
             buffered = io.BytesIO()
             pil_image.save(buffered, format="PNG")
             buffered.seek(0)
 
-            # Send to OCR API
             files = {'file': (f'page_{page_num + 1}.png', buffered, 'image/png')}
 
             try:
@@ -209,19 +212,68 @@ class DoclingService:
                     response.raise_for_status()
                     ocr_result = response.json()
 
-                # Process OCR results
                 page_content, page_tables = self._format_ocr_results(
-                    ocr_result,
-                    page_num + 1,
-                    detect_tables
+                    ocr_result, page_num + 1, detect_tables
                 )
-
                 markdown_content += page_content
                 tables_count += page_tables
 
             except Exception as e:
-                logger.error(f"OCR error on page {page_num + 1}: {e}")
+                errors += 1
+                logger.error(f"PaddleOCR error on page {page_num + 1}: {e}")
+                # If first page already fails, raise immediately to trigger EasyOCR
+                if page_num == 0:
+                    raise
                 markdown_content += f"\n## Page {page_num + 1}\n\n_[Error processing this page]_\n"
+
+        # If all pages errored, raise so EasyOCR can try
+        if errors == n_pages:
+            raise RuntimeError("PaddleOCR failed on all pages")
+
+        return markdown_content, tables_count
+
+    async def _process_with_easyocr(
+        self,
+        pdf_path: Path,
+        filename: str,
+    ) -> Tuple[str, int]:
+        """
+        Last-resort OCR using EasyOCR on CPU.
+        Loaded on-demand to avoid GPU memory usage at startup.
+        """
+        import easyocr
+
+        logger.info("Loading EasyOCR on CPU (fallback)...")
+        reader = easyocr.Reader(
+            settings.DOCLING_OCR_LANGUAGES,
+            gpu=False
+        )
+
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        n_pages = len(pdf)
+
+        markdown_content = f"# {Path(filename).stem}\n"
+        tables_count = 0
+
+        for page_num in range(n_pages):
+            logger.info(f"EasyOCR: page {page_num + 1}/{n_pages}")
+
+            page = pdf[page_num]
+            pil_image = page.render(scale=2).to_pil()
+
+            # EasyOCR accepts PIL images directly
+            results = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: reader.readtext(pil_image, detail=1)
+            )
+
+            page_content = f"\n## Page {page_num + 1}\n\n"
+            if results:
+                lines = [text for (_, text, conf) in results if conf > 0.3]
+                page_content += "\n".join(lines) + "\n"
+            else:
+                page_content += "_[No text detected]_\n"
+
+            markdown_content += page_content
 
         return markdown_content, tables_count
 

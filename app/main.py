@@ -75,6 +75,17 @@ async def lifespan(app: FastAPI):
     # Cleanup GPU resources
     docling_service.cleanup()
 
+    # Final GPU memory cleanup
+    try:
+        import torch
+        if torch.cuda.is_available():
+            import gc
+            gc.collect()
+            torch.cuda.empty_cache()
+            logger.info("Final GPU memory cleanup completed")
+    except Exception as e:
+        logger.warning(f"GPU cleanup error: {e}")
+
     logger.info("Docling API Service shut down successfully")
     logger.info("=" * 60)
 

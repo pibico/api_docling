@@ -36,7 +36,7 @@ class Settings(BaseSettings):
     # Server Configuration
     HOST: str = "0.0.0.0"
     PORT: int = 6952  # Port for api_docling
-    WORKERS: int = 2
+    WORKERS: int = 1
     RELOAD: bool = False
     ROOT_PATH: str = ""  # Set to /docling when behind nginx proxy
 
